@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <title>SecuriteView P2P</title>
+
+  <!-- Permissões mobile -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React + ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, updateDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+    /* ================= FIREBASE ================= */
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAuDL0Y0BAQKlqN2_ctSzQCA4E5RXtFP_4",
+      authDomain: "securiteview-p2p.firebaseapp.com",
+      projectId: "securiteview-p2p",
+      storageBucket: "securiteview-p2p.firebasestorage.app",
+      messagingSenderId: "1021051446315",
+      appId: "1:1021051446315:web:d49d774565223fa838b66e"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    /* ================= HELPERS ================= */
+
+    const rtcConfig = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    };
+
+    const uuid = () =>
+      'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+
+    /* ================= APP ================= */
+
+    function App() {
+      const [user, setUser] = React.useState(null);
+      const [mode, setMode] = React.useState("menu");
+      const [roomId, setRoomId] = React.useState("");
+      const [status, setStatus] = React.useState("Inicializando...");
+      const [streaming, setStreaming] = React.useState(false);
+      const [remoteStreams, setRemoteStreams] = React.useState({});
+
+      const cameraId = React.useRef(uuid());
+      const localStream = React.useRef(null);
+      const pcs = React.useRef({});
+
+      React.useEffect(() => {
+        signInAnonymously(auth);
+        onAuthStateChanged(auth, u => {
+          setUser(u);
+          if (u) setStatus("Pronto");
+        });
+      }, []);
+
+      const startCamera = async () => {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: true
+        });
+
+        localStream.current = stream;
+        setStreaming(true);
+
+        const pc = new RTCPeerConnection(rtcConfig);
+        pcs.current[cameraId.current] = pc;
+        stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+        const ref = doc(db, "rooms", roomId, "peers", cameraId.current);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        await setDoc(ref, { offer });
+
+        onSnapshot(ref, async snap => {
+          const d = snap.data();
+          if (d?.answer) await pc.setRemoteDescription(d.answer);
+        });
+      };
+
+      const startViewer = async () => {
+        setStreaming(true);
+
+        const col = collection(db, "rooms", roomId, "peers");
+        onSnapshot(col, snap => {
+          snap.docChanges().forEach(async c => {
+            if (c.type !== "added") return;
+
+            const pc = new RTCPeerConnection(rtcConfig);
+            pcs.current[c.doc.id] = pc;
+
+            pc.ontrack = e => {
+              setRemoteStreams(p => ({ ...p, [c.doc.id]: e.streams[0] }));
+            };
+
+            await pc.setRemoteDescription(c.doc.data().offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await updateDoc(c.doc.ref, { answer });
+          });
+        });
+      };
+
+      return React.createElement(
+        "div",
+        { className: "min-h-screen bg-slate-950 text-white p-6" },
+        React.createElement("h1", { className: "text-xl font-bold mb-6 text-center" }, "SecuriteView P2P"),
+        mode === "menu"
+          ? React.createElement("div", { className: "space-y-4" },
+              React.createElement("button", {
+                className: "w-full bg-blue-600 p-4 rounded-xl",
+                onClick: () => setMode("camera")
+              }, "Modo Câmera"),
+              React.createElement("button", {
+                className: "w-full bg-green-600 p-4 rounded-xl",
+                onClick: () => setMode("viewer")
+              }, "Modo Âncora")
+            )
+          : React.createElement("div", { className: "space-y-4" },
+              React.createElement("input", {
+                className: "w-full p-4 rounded-xl text-black",
+                placeholder: "ID DA SALA",
+                value: roomId,
+                onChange: e => setRoomId(e.target.value)
+              }),
+              React.createElement("button", {
+                className: "w-full bg-purple-600 p-4 rounded-xl",
+                onClick: mode === "camera" ? startCamera : startViewer
+              }, "Iniciar")
+            ),
+        React.createElement("div", { className: "grid grid-cols-1 gap-4 mt-6" },
+          Object.values(remoteStreams).map((s, i) =>
+            React.createElement("video", {
+              key: i,
+              autoPlay: true,
+              playsInline: true,
+              ref: v => v && (v.srcObject = s),
+              className: "rounded-xl bg-black"
+            })
+          )
+        )
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</head>
+
+<body>
+  <div id="root"></div>
+</body>
+</html>
