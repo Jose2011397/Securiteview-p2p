@@ -1,205 +1,294 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SecuriteView P2P</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
-        body { font-family: 'Inter', sans-serif; }
-    </style>
-</head>
-<body class="bg-slate-950 text-slate-100">
-    <div id="root"></div>
+  <meta charset="UTF-8" />
+  <title>SecuriteView P2P</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
-        
-        // Mock/Simulação das dependências do Firebase (Devem ser carregadas via CDN se for usar real)
-        // Nota: Para funcionamento real, as bibliotecas Firebase precisam ser importadas via script module.
-        // Aqui mantive a lógica idêntica ao seu código React.
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
 
-        const App = () => {
-            const [user, setUser] = useState(null);
-            const [mode, setMode] = useState('menu');
-            const [roomId, setRoomId] = useState('');
-            const [status, setStatus] = useState('Autenticando...');
-            const [isStreaming, setIsStreaming] = useState(false);
-            
-            const [remoteStreams, setRemoteStreams] = useState({}); 
-            const [activePeerConfigs, setActivePeerConfigs] = useState({}); 
-            const [focusedPeerId, setFocusedPeerId] = useState(null); 
-            const [isSimulatedFs, setIsSimulatedFs] = useState(false);
-            const [audioEnabled, setAudioEnabled] = useState(false);
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import {
+      getFirestore, doc, setDoc, onSnapshot,
+      collection, addDoc, updateDoc, getDoc
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    import {
+      getAuth, signInAnonymously, signInWithCustomToken,
+      onAuthStateChanged
+    } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
-            const localStream = useRef(null);
-            const peerConnections = useRef({}); 
-            const containerRef = useRef(null);
-            const cameraId = useRef(crypto.randomUUID());
-            
-            const remoteAudioRef = useRef(null); 
-            const audioContext = useRef(null);
+    /* ================= CONFIG ================= */
 
-            const rtcConfig = {
-                iceServers: [
-                    { urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
-                    { urls: ['stun:stun.l.google.com:19302'] }
-                ]
-            };
+    const firebaseConfig = JSON.parse(window.__firebase_config || "{}");
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    const appId = window.__app_id || "securiteview-p2p";
 
-            const resumeAudioContext = async () => {
-                try {
-                    if (!audioContext.current) {
-                        audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
-                    }
-                    if (audioContext.current.state === 'suspended') {
-                        await audioContext.current.resume();
-                    }
-                    
-                    const audios = document.querySelectorAll('audio, video');
-                    audios.forEach(el => {
-                        el.play().catch(() => console.log("Play pendente de interação"));
-                    });
-                    setAudioEnabled(true);
-                } catch (e) {
-                    console.error("Erro ao ativar áudio:", e);
-                }
-            };
+    const rtcConfig = {
+      iceServers: [
+        { urls: ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"] },
+        { urls: ["stun:stun.l.google.com:19302"] }
+      ]
+    };
 
-            // Inicia ícones do Lucide após renderizar
-            useEffect(() => {
-                lucide.createIcons();
+    /* ================= STATE ================= */
+
+    let user = null;
+    let mode = "menu";
+    let roomId = "";
+    let status = "Autenticando...";
+    let isStreaming = false;
+    let audioEnabled = false;
+    let focusedPeerId = null;
+    let isSimulatedFs = false;
+
+    const remoteStreams = {};
+    const activePeerConfigs = {};
+    const peerConnections = {};
+    const cameraId = crypto.randomUUID();
+
+    let localStream = null;
+    let audioContext = null;
+
+    /* ================= ELEMENTS ================= */
+
+    const appEl = document.getElementById("app");
+    const remoteAudio = document.getElementById("remoteAudio");
+    const containerRef = document.getElementById("videoContainer");
+
+    /* ================= AUDIO ================= */
+
+    async function resumeAudioContext() {
+      try {
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioContext.state === "suspended") {
+          await audioContext.resume();
+        }
+        document.querySelectorAll("audio,video").forEach(el => {
+          el.play().catch(() => {});
+        });
+        audioEnabled = true;
+        render();
+      } catch {}
+    }
+
+    /* ================= AUTH ================= */
+
+    async function initAuth() {
+      try {
+        if (window.__initial_auth_token) {
+          await signInWithCustomToken(auth, window.__initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch {
+        status = "Erro de autenticação";
+      }
+    }
+
+    onAuthStateChanged(auth, u => {
+      user = u;
+      if (u) status = "Pronto";
+      render();
+    });
+
+    initAuth();
+
+    /* ================= FIREBASE HELPERS ================= */
+
+    const peersCol = room =>
+      collection(db, "artifacts", appId, "public", "data", "rooms", room, "peers");
+
+    const peerDoc = (room, id) =>
+      doc(db, "artifacts", appId, "public", "data", "rooms", room, "peers", id);
+
+    /* ================= CAMERA MODE ================= */
+
+    async function startCameraMode() {
+      if (!roomId || !user) return;
+      await resumeAudioContext();
+      status = "Iniciando espião...";
+      render();
+
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: { echoCancellation: true, noiseSuppression: true }
+      });
+
+      const pc = new RTCPeerConnection(rtcConfig);
+      peerConnections[cameraId] = pc;
+
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      pc.addTransceiver("audio", { direction: "recvonly" });
+
+      pc.ontrack = e => {
+        if (e.track.kind === "audio") {
+          remoteAudio.srcObject = e.streams[0];
+          remoteAudio.play().catch(() => audioEnabled = false);
+        }
+      };
+
+      const docRef = peerDoc(roomId, cameraId);
+      const offerCandidates = collection(docRef, "offerCandidates");
+      const answerCandidates = collection(docRef, "answerCandidates");
+
+      pc.onicecandidate = e => {
+        if (e.candidate) addDoc(offerCandidates, e.candidate.toJSON());
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      await setDoc(docRef, {
+        cameraId,
+        offer,
+        createdBy: user.uid,
+        timestamp: Date.now(),
+        controls: { zoom: 1, rotation: 0, remoteMic: true, anchorMic: true }
+      });
+
+      onSnapshot(docRef, async snap => {
+        const d = snap.data();
+        if (d?.answer && pc.signalingState !== "stable") {
+          await pc.setRemoteDescription(d.answer);
+        }
+        if (d?.controls) {
+          const v = localStream.getVideoTracks()[0];
+          if (v?.getCapabilities?.().zoom) {
+            v.applyConstraints({ advanced: [{ zoom: d.controls.zoom }] });
+          }
+          const a = localStream.getAudioTracks()[0];
+          if (a) a.enabled = d.controls.remoteMic;
+        }
+      });
+
+      onSnapshot(answerCandidates, s => {
+        s.docChanges().forEach(c => {
+          if (c.type === "added") pc.addIceCandidate(c.doc.data());
+        });
+      });
+
+      isStreaming = true;
+      status = "Transmissão Ativa";
+      render();
+    }
+
+    /* ================= VIEWER MODE ================= */
+
+    async function startViewerMode() {
+      if (!roomId || !user) return;
+      await resumeAudioContext();
+      status = "Conectando...";
+      render();
+
+      let anchorStream = null;
+      try {
+        anchorStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {}
+
+      onSnapshot(peersCol(roomId), snap => {
+        snap.docChanges().forEach(async c => {
+          if (c.type !== "added") return;
+          const id = c.doc.id;
+          const data = c.doc.data();
+          if (peerConnections[id]) return;
+
+          const pc = new RTCPeerConnection(rtcConfig);
+          peerConnections[id] = pc;
+
+          anchorStream?.getTracks().forEach(t => pc.addTrack(t, anchorStream));
+
+          pc.ontrack = e => {
+            remoteStreams[id] = e.streams[0];
+            render();
+          };
+
+          const docRef = peerDoc(roomId, id);
+          const offerCandidates = collection(docRef, "offerCandidates");
+          const answerCandidates = collection(docRef, "answerCandidates");
+
+          pc.onicecandidate = e => {
+            if (e.candidate) addDoc(answerCandidates, e.candidate.toJSON());
+          };
+
+          await pc.setRemoteDescription(data.offer);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await updateDoc(docRef, { answer });
+
+          onSnapshot(docRef, s => {
+            activePeerConfigs[id] = s.data()?.controls || {};
+            render();
+          });
+
+          onSnapshot(offerCandidates, s2 => {
+            s2.docChanges().forEach(x => {
+              if (x.type === "added") pc.addIceCandidate(x.doc.data());
             });
+          });
+        });
+      });
 
-            const resetApp = () => {
-                Object.values(peerConnections.current).forEach(pc => pc.close());
-                peerConnections.current = {};
-                if (localStream.current) localStream.current.getTracks().forEach(t => t.stop());
-                setRemoteStreams({});
-                setFocusedPeerId(null);
-                setMode('menu');
-                setIsStreaming(false);
-                setStatus('Pronto');
-                setAudioEnabled(false);
-            };
+      isStreaming = true;
+      status = "Monitoramento Ativo";
+      render();
+    }
 
-            const toggleFocus = (peerId) => {
-                resumeAudioContext();
-                if (focusedPeerId === peerId) {
-                    setFocusedPeerId(null);
-                    if (document.fullscreenElement) document.exitFullscreen();
-                } else {
-                    setFocusedPeerId(peerId);
-                    if (containerRef.current) containerRef.current.requestFullscreen().catch(() => setIsSimulatedFs(true));
-                }
-            };
+    /* ================= RENDER ================= */
 
-            return (
-                <div onClick={resumeAudioContext} className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans overflow-x-hidden">
-                    <header className="w-full bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center justify-between shadow-xl z-20">
-                        <div className="flex items-center gap-3">
-                            <div className="bg-blue-600 p-2 rounded-xl"><i data-lucide="shield-check" className="text-white w-5 h-5"></i></div>
-                            <h1 className="text-sm font-bold uppercase tracking-tighter">SecuriteView P2P</h1>
-                        </div>
-                        {mode !== 'menu' && (
-                            <button onClick={resetApp} className="bg-red-500/10 text-red-500 px-4 py-2 rounded-lg text-[10px] font-black border border-red-500/20 active:scale-95 transition-all">SAIR</button>
-                        )}
-                    </header>
+    function render() {
+      appEl.innerHTML = `
+        <div class="min-h-screen bg-slate-950 text-white p-6">
+          <h1 class="text-xl font-bold mb-4">SecuriteView P2P</h1>
 
-                    <main className="flex-1 w-full max-w-2xl mx-auto p-6 flex flex-col gap-6">
-                        {mode === 'menu' ? (
-                            <div className="flex flex-col gap-4 py-12">
-                                <button onClick={() => setMode('camera')} className="flex items-center gap-5 p-6 bg-slate-900 border border-slate-800 rounded-3xl hover:bg-slate-800 active:scale-95 transition-all group">
-                                    <i data-lucide="camera" className="text-blue-500 w-10 h-10 group-hover:scale-110 transition-transform"></i>
-                                    <div className="text-left">
-                                        <span className="block text-xl font-bold">Modo Câmera</span>
-                                        <span className="text-[10px] text-slate-500 uppercase font-black tracking-widest">Transmitir Dispositivo</span>
-                                    </div>
-                                </button>
-                                <button onClick={() => setMode('viewer')} className="flex items-center gap-5 p-6 bg-slate-900 border border-slate-800 rounded-3xl hover:bg-slate-800 active:scale-95 transition-all group">
-                                    <i data-lucide="monitor-play" className="text-green-500 w-10 h-10 group-hover:scale-110 transition-transform"></i>
-                                    <div className="text-left">
-                                        <span className="block text-xl font-bold">Modo Âncora</span>
-                                        <span className="text-[10px] text-slate-500 uppercase font-black tracking-widest">Monitorar Múltiplas Câmeras</span>
-                                    </div>
-                                </button>
-                            </div>
-                        ) : (
-                            <div className="flex flex-col gap-6">
-                                {!isStreaming && (
-                                    <div className="bg-slate-900 p-6 rounded-[2rem] border border-slate-800 space-y-4 shadow-2xl">
-                                        <input
-                                            type="text"
-                                            placeholder="ID DA SALA"
-                                            value={roomId}
-                                            onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-                                            className="w-full bg-slate-950 border border-slate-800 rounded-2xl py-4 text-2xl font-mono text-center outline-none focus:ring-2 focus:ring-blue-600 transition-all text-white"
-                                        />
-                                        <p className="text-[10px] text-slate-500 text-center font-bold tracking-[0.2em] uppercase animate-pulse">{status}</p>
-                                        <button
-                                            disabled={!roomId}
-                                            onClick={() => setIsStreaming(true)}
-                                            className={`w-full ${mode === 'camera' ? 'bg-blue-600 shadow-blue-900/40' : 'bg-green-600 shadow-green-900/40'} py-5 rounded-2xl font-black text-xs tracking-widest shadow-xl active:scale-95 transition-all disabled:opacity-30`}
-                                        >
-                                            {mode === 'camera' ? 'ATIVAR TRANSMISSOR' : 'ATIVAR MONITORAMENTO'}
-                                        </button>
-                                    </div>
-                                )}
+          ${mode === "menu" ? `
+            <button onclick="setMode('camera')" class="btn">Modo Câmera</button>
+            <button onclick="setMode('viewer')" class="btn mt-3">Modo Âncora</button>
+          ` : `
+            <input class="input" placeholder="ID DA SALA"
+              value="${roomId}"
+              oninput="roomId=this.value.toUpperCase()" />
+            <p class="text-xs mt-2">${status}</p>
 
-                                {isStreaming && (
-                                    <div ref={containerRef} className={`${isSimulatedFs ? 'fixed inset-0 z-50 bg-black' : 'relative min-h-[400px] bg-slate-900 rounded-[2.5rem] border border-slate-800 shadow-2xl overflow-hidden'} flex items-center justify-center`}>
-                                        {mode === 'camera' ? (
-                                            <div className="flex flex-col items-center gap-6 p-10 text-center">
-                                                <audio ref={remoteAudioRef} autoPlay playsInline />
-                                                <div className="relative">
-                                                    <div className="w-24 h-24 bg-blue-600/10 rounded-full flex items-center justify-center border-2 border-blue-600/50 animate-pulse">
-                                                        <i data-lucide="video" className="text-blue-500 w-12 h-12"></i>
-                                                    </div>
-                                                    {audioEnabled && (
-                                                        <div className="absolute -top-2 -right-2 bg-green-500 p-1.5 rounded-full border-2 border-slate-900">
-                                                            <i data-lucide="volume-2" className="text-white w-4 h-4"></i>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                <div className="px-6 py-2 bg-blue-600/20 rounded-full border border-blue-500/30">
-                                                    <span className="text-[10px] font-black text-blue-400 tracking-[0.3em] uppercase">Transmitindo</span>
-                                                </div>
-                                                
-                                                {!audioEnabled ? (
-                                                    <button 
-                                                        onClick={resumeAudioContext}
-                                                        className="flex items-center gap-3 bg-white text-black px-6 py-4 rounded-2xl font-black text-[10px] tracking-widest active:scale-95 transition-all shadow-2xl"
-                                                    >
-                                                        <i data-lucide="headphones" className="w-5 h-5"></i> ATIVAR ÁUDIO DE RETORNO
-                                                    </button>
-                                                ) : (
-                                                    <p className="text-[10px] text-slate-500 uppercase font-bold opacity-50 max-w-[200px]">
-                                                        Áudio de retorno ativo. Você ouvirá o monitor aqui.
-                                                    </p>
-                                                )}
-                                            </div>
-                                        ) : (
-                                            <div className="p-10 text-center">
-                                                <p className="text-slate-400">Aguardando conexões P2P...</p>
-                                            </div>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                    </main>
-                    <footer className="p-8 text-slate-800 text-[8px] uppercase tracking-[0.4em] font-black text-center opacity-40">P2P Secure Multicam • v2.5 Ultra</footer>
-                </div>
-            );
-        };
+            ${!isStreaming ? `
+              <button onclick="${mode === "camera" ? "startCameraMode()" : "startViewerMode()"}"
+                class="btn mt-4">ATIVAR</button>
+            ` : `
+              <div id="videos" class="grid mt-6 gap-3"></div>
+            `}
+          `}
+        </div>
+      `;
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
+      const videos = document.getElementById("videos");
+      if (videos) {
+        Object.entries(remoteStreams).forEach(([id, stream]) => {
+          const v = document.createElement("video");
+          v.autoplay = true;
+          v.playsInline = true;
+          v.srcObject = stream;
+          v.className = "rounded-xl bg-black";
+          videos.appendChild(v);
+        });
+      }
+    }
+
+    window.setMode = m => { mode = m; render(); };
+    window.startCameraMode = startCameraMode;
+    window.startViewerMode = startViewerMode;
+
+    render();
+  </script>
+</head>
+
+<body onclick="resumeAudioContext?.()">
+  <audio id="remoteAudio" autoplay playsinline></audio>
+  <div id="app"></div>
 </body>
 </html>
