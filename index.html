@@ -1,170 +1,292 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-  <meta charset="UTF-8" />
-  <title>SecuriteView P2P</title>
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import {
+  getFirestore,
+  doc,
+  setDoc,
+  onSnapshot,
+  collection,
+  addDoc,
+  updateDoc,
+  getDoc
+} from 'firebase/firestore';
+import {
+  getAuth,
+  signInAnonymously,
+  signInWithCustomToken,
+  onAuthStateChanged
+} from 'firebase/auth';
+import {
+  Camera,
+  ShieldCheck,
+  Video,
+  MonitorPlay,
+  Plus,
+  Minus,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Maximize,
+  Minimize,
+  RotateCw,
+  Headphones
+} from 'lucide-react';
 
-  <!-- Permissões mobile -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+/* ================= CONFIGURAÇÃO ================= */
 
-  <!-- Tailwind CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'securiteview-p2p';
 
-  <!-- React + ReactDOM -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+const rtcConfig = {
+  iceServers: [
+    { urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }
+  ]
+};
 
-  <!-- Firebase -->
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-    import { getFirestore, doc, setDoc, updateDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+/* ================= APP ================= */
 
-    /* ================= FIREBASE ================= */
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [mode, setMode] = useState('menu');
+  const [roomId, setRoomId] = useState('');
+  const [status, setStatus] = useState('Autenticando...');
+  const [isStreaming, setIsStreaming] = useState(false);
 
-    const firebaseConfig = {
-      apiKey: "AIzaSyAuDL0Y0BAQKlqN2_ctSzQCA4E5RXtFP_4",
-      authDomain: "securiteview-p2p.firebaseapp.com",
-      projectId: "securiteview-p2p",
-      storageBucket: "securiteview-p2p.firebasestorage.app",
-      messagingSenderId: "1021051446315",
-      appId: "1:1021051446315:web:d49d774565223fa838b66e"
-    };
+  const [permissionsGranted, setPermissionsGranted] = useState(false);
+  const [permissionError, setPermissionError] = useState('');
 
-    const app = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const db = getFirestore(app);
+  const [remoteStreams, setRemoteStreams] = useState({});
+  const [activePeerConfigs, setActivePeerConfigs] = useState({});
+  const [focusedPeerId, setFocusedPeerId] = useState(null);
+  const [isSimulatedFs, setIsSimulatedFs] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(false);
 
-    /* ================= HELPERS ================= */
+  const localStream = useRef(null);
+  const peerConnections = useRef({});
+  const containerRef = useRef(null);
+  const cameraId = useRef('a917e22e-ea80-454c-af30-2a637498d1f5');
+  const remoteAudioRef = useRef(null);
+  const audioContext = useRef(null);
 
-    const rtcConfig = {
-      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-    };
+  /* ================= AUDIO POLICY ================= */
 
-    const uuid = () =>
-      'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
+  const resumeAudioContext = async () => {
+    if (!audioContext.current) {
+      audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioContext.current.state === 'suspended') {
+      await audioContext.current.resume();
+    }
+    document.querySelectorAll('audio,video').forEach(el => el.play().catch(() => {}));
+    setAudioEnabled(true);
+  };
+
+  /* ================= PERMISSÕES (APK) ================= */
+
+  const requestPermissions = async () => {
+    try {
+      setPermissionError('');
+      await resumeAudioContext();
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
       });
 
-    /* ================= APP ================= */
+      stream.getTracks().forEach(t => t.stop());
+      setPermissionsGranted(true);
+    } catch (e) {
+      setPermissionError('Permissão de câmera ou microfone negada');
+      setPermissionsGranted(false);
+    }
+  };
 
-    function App() {
-      const [user, setUser] = React.useState(null);
-      const [mode, setMode] = React.useState("menu");
-      const [roomId, setRoomId] = React.useState("");
-      const [status, setStatus] = React.useState("Inicializando...");
-      const [streaming, setStreaming] = React.useState(false);
-      const [remoteStreams, setRemoteStreams] = React.useState({});
+  /* ================= AUTH ================= */
 
-      const cameraId = React.useRef(uuid());
-      const localStream = React.useRef(null);
-      const pcs = React.useRef({});
+  useEffect(() => {
+    const init = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined') {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch {
+        setStatus('Erro de autenticação');
+      }
+    };
+    init();
+    return onAuthStateChanged(auth, u => {
+      setUser(u);
+      if (u) setStatus('Pronto');
+    });
+  }, []);
 
-      React.useEffect(() => {
-        signInAnonymously(auth);
-        onAuthStateChanged(auth, u => {
-          setUser(u);
-          if (u) setStatus("Pronto");
-        });
-      }, []);
+  const getPeerDoc = (room, id) =>
+    doc(db, 'artifacts', appId, 'public', 'data', 'rooms', room, 'peers', id);
 
-      const startCamera = async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: true
-        });
+  const getPeersCol = room =>
+    collection(db, 'artifacts', appId, 'public', 'data', 'rooms', room, 'peers');
 
-        localStream.current = stream;
-        setStreaming(true);
+  /* ================= CAMERA ================= */
+
+  const startCameraMode = async () => {
+    if (!permissionsGranted) return;
+    await resumeAudioContext();
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' },
+      audio: true
+    });
+
+    localStream.current = stream;
+    setIsStreaming(true);
+
+    const pc = new RTCPeerConnection(rtcConfig);
+    peerConnections.current[cameraId.current] = pc;
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+
+    pc.ontrack = e => {
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.srcObject = e.streams[0];
+        remoteAudioRef.current.play().catch(() => setAudioEnabled(false));
+      }
+    };
+
+    const peerRef = getPeerDoc(roomId, cameraId.current);
+    const offerCol = collection(peerRef, 'offerCandidates');
+    const answerCol = collection(peerRef, 'answerCandidates');
+
+    pc.onicecandidate = e => e.candidate && addDoc(offerCol, e.candidate.toJSON());
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    await setDoc(peerRef, {
+      offer,
+      controls: { zoom: 1, rotation: 0, remoteMic: true, anchorMic: true }
+    });
+
+    onSnapshot(peerRef, s => {
+      const d = s.data();
+      if (d?.answer) pc.setRemoteDescription(d.answer);
+      if (d?.controls) {
+        const v = stream.getVideoTracks()[0];
+        if (v?.getCapabilities?.().zoom)
+          v.applyConstraints({ advanced: [{ zoom: d.controls.zoom }] }).catch(() => {});
+        const a = stream.getAudioTracks()[0];
+        if (a) a.enabled = d.controls.remoteMic;
+      }
+    });
+
+    onSnapshot(answerCol, s =>
+      s.docChanges().forEach(c => pc.addIceCandidate(c.doc.data()).catch(() => {}))
+    );
+
+    setStatus('Transmissão Ativa');
+  };
+
+  /* ================= VIEWER ================= */
+
+  const startViewerMode = async () => {
+    if (!permissionsGranted) return;
+    await resumeAudioContext();
+    setIsStreaming(true);
+
+    const anchorStream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+    localStream.current = anchorStream;
+
+    onSnapshot(getPeersCol(roomId), snap => {
+      snap.docChanges().forEach(async ch => {
+        if (ch.type !== 'added') return;
+        const id = ch.doc.id;
+        if (peerConnections.current[id]) return;
 
         const pc = new RTCPeerConnection(rtcConfig);
-        pcs.current[cameraId.current] = pc;
-        stream.getTracks().forEach(t => pc.addTrack(t, stream));
+        peerConnections.current[id] = pc;
 
-        const ref = doc(db, "rooms", roomId, "peers", cameraId.current);
+        anchorStream?.getTracks().forEach(t => pc.addTrack(t, anchorStream));
+        pc.ontrack = e => setRemoteStreams(p => ({ ...p, [id]: e.streams[0] }));
 
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
+        const ref = getPeerDoc(roomId, id);
+        const offerCol = collection(ref, 'offerCandidates');
+        const answerCol = collection(ref, 'answerCandidates');
 
-        await setDoc(ref, { offer });
+        pc.onicecandidate = e => e.candidate && addDoc(answerCol, e.candidate.toJSON());
+        await pc.setRemoteDescription(ch.doc.data().offer);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await updateDoc(ref, { answer });
 
-        onSnapshot(ref, async snap => {
-          const d = snap.data();
-          if (d?.answer) await pc.setRemoteDescription(d.answer);
-        });
-      };
+        onSnapshot(ref, s => setActivePeerConfigs(p => ({ ...p, [id]: s.data()?.controls })));
+        onSnapshot(offerCol, s =>
+          s.docChanges().forEach(c => pc.addIceCandidate(c.doc.data()).catch(() => {}))
+        );
+      });
+    });
 
-      const startViewer = async () => {
-        setStreaming(true);
+    setStatus('Monitoramento Ativo');
+  };
 
-        const col = collection(db, "rooms", roomId, "peers");
-        onSnapshot(col, snap => {
-          snap.docChanges().forEach(async c => {
-            if (c.type !== "added") return;
+  /* ================= RESET ================= */
 
-            const pc = new RTCPeerConnection(rtcConfig);
-            pcs.current[c.doc.id] = pc;
+  const resetApp = () => {
+    Object.values(peerConnections.current).forEach(pc => pc.close());
+    peerConnections.current = {};
+    localStream.current?.getTracks().forEach(t => t.stop());
+    setRemoteStreams({});
+    setIsStreaming(false);
+    setPermissionsGranted(false);
+    setMode('menu');
+  };
 
-            pc.ontrack = e => {
-              setRemoteStreams(p => ({ ...p, [c.doc.id]: e.streams[0] }));
-            };
+  /* ================= UI ================= */
 
-            await pc.setRemoteDescription(c.doc.data().offer);
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            await updateDoc(c.doc.ref, { answer });
-          });
-        });
-      };
+  return (
+    <div onClick={resumeAudioContext} className="min-h-screen bg-slate-950 text-slate-100">
+      <header className="p-4 flex justify-between bg-slate-900">
+        <h1 className="font-bold">SecuriteView P2P</h1>
+        {mode !== 'menu' && <button onClick={resetApp}>SAIR</button>}
+      </header>
 
-      return React.createElement(
-        "div",
-        { className: "min-h-screen bg-slate-950 text-white p-6" },
-        React.createElement("h1", { className: "text-xl font-bold mb-6 text-center" }, "SecuriteView P2P"),
-        mode === "menu"
-          ? React.createElement("div", { className: "space-y-4" },
-              React.createElement("button", {
-                className: "w-full bg-blue-600 p-4 rounded-xl",
-                onClick: () => setMode("camera")
-              }, "Modo Câmera"),
-              React.createElement("button", {
-                className: "w-full bg-green-600 p-4 rounded-xl",
-                onClick: () => setMode("viewer")
-              }, "Modo Âncora")
-            )
-          : React.createElement("div", { className: "space-y-4" },
-              React.createElement("input", {
-                className: "w-full p-4 rounded-xl text-black",
-                placeholder: "ID DA SALA",
-                value: roomId,
-                onChange: e => setRoomId(e.target.value)
-              }),
-              React.createElement("button", {
-                className: "w-full bg-purple-600 p-4 rounded-xl",
-                onClick: mode === "camera" ? startCamera : startViewer
-              }, "Iniciar")
-            ),
-        React.createElement("div", { className: "grid grid-cols-1 gap-4 mt-6" },
-          Object.values(remoteStreams).map((s, i) =>
-            React.createElement("video", {
-              key: i,
-              autoPlay: true,
-              playsInline: true,
-              ref: v => v && (v.srcObject = s),
-              className: "rounded-xl bg-black"
-            })
-          )
-        )
-      );
-    }
-
-    ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
-  </script>
-</head>
-
-<body>
-  <div id="root"></div>
-</body>
-</html>
+      <main className="p-6">
+        {mode === 'menu' ? (
+          <>
+            <button onClick={() => setMode('camera')}>Modo Câmera</button>
+            <button onClick={() => setMode('viewer')}>Modo Âncora</button>
+          </>
+        ) : (
+          <>
+            {!isStreaming && (
+              <>
+                <input value={roomId} onChange={e => setRoomId(e.target.value)} />
+                <button
+                  onClick={
+                    !permissionsGranted
+                      ? requestPermissions
+                      : mode === 'camera'
+                        ? startCameraMode
+                        : startViewerMode
+                  }
+                >
+                  {!permissionsGranted
+                    ? 'PERMITIR CÂMERA E MICROFONE'
+                    : mode === 'camera'
+                      ? 'ATIVAR TRANSMISSOR'
+                      : 'ATIVAR MONITOR'}
+                </button>
+                {permissionError && <p>{permissionError}</p>}
+              </>
+            )}
+            {isStreaming && <p>{status}</p>}
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
